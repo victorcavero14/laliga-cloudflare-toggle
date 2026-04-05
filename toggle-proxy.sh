@@ -302,7 +302,17 @@ if [[ "$hayahora_ok" == "false" ]]; then
 
     # Comprobar antiguedad del primer registro deshabilitado
     oldest_ts="$(echo "$current_state" | jq -r '.[0].disabled_at')"
-    oldest_epoch="$(date -d "$oldest_ts" +%s 2>/dev/null || date -j -f "%Y-%m-%dT%H:%M:%SZ" "$oldest_ts" +%s 2>/dev/null || echo 0)"
+    # disabled_at puede ser epoch (numerico) o ISO 8601 (legacy)
+    if [[ "$oldest_ts" =~ ^[0-9]+$ ]]; then
+        oldest_epoch="$oldest_ts"
+    else
+        oldest_epoch="$(date -d "$oldest_ts" +%s 2>/dev/null || date -j -f "%Y-%m-%dT%H:%M:%SZ" "$oldest_ts" +%s 2>/dev/null || echo "")"
+    fi
+    # Si no se pudo parsear, no asumir timeout -- esperar
+    if [[ -z "$oldest_epoch" || "$oldest_epoch" == "0" ]]; then
+        log "WARN" "No se pudo parsear disabled_at='$oldest_ts'. Esperando sin cambios."
+        exit 0
+    fi
     now_epoch="$(date +%s)"
     elapsed=$(( now_epoch - oldest_epoch ))
 
@@ -503,7 +513,7 @@ if [[ "$action" == "disable" ]]; then
                     --arg name "$record_name" \
                     --arg type "$record_type" \
                     --arg content "$record_content" \
-                    --arg ts "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" \
+                    --argjson ts "$(date +%s)" \
                     '. + [{zone_id: $zid, record_id: $id, name: $name, type: $type, content: $content, disabled_at: $ts}]' \
                     "$STATE_FILE" 2>/dev/null)" && atomic_write "$STATE_FILE" "$new_state" || {
                     log "ERROR" "  No se pudo actualizar state file para $record_name"
