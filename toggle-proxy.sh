@@ -59,6 +59,54 @@ notify_telegram() {
     fi
 }
 
+# Comprobar si una IP pertenece a los rangos de Cloudflare
+# Usa los rangos publicados en cloudflare.com/ips
+is_cloudflare_ip() {
+    local ip="$1"
+
+    # IPv6: comprobar prefijos conocidos de Cloudflare
+    if [[ "$ip" == *:* ]]; then
+        local cf6_prefixes="2400:cb00 2606:4700 2803:f800 2405:b500 2405:8100 2a06:98c 2c0f:f248"
+        for prefix in $cf6_prefixes; do
+            [[ "$ip" == ${prefix}* ]] && return 0
+        done
+        return 1
+    fi
+
+    # IPv4: extraer primer y segundo octeto y comprobar contra rangos CIDR conocidos
+    local oct1 oct2 oct3
+    IFS='.' read -r oct1 oct2 oct3 _ <<< "$ip"
+
+    # Rangos Cloudflare IPv4 (de cloudflare.com/ips-v4):
+    # 103.21.244.0/22, 103.22.200.0/22, 103.31.4.0/22
+    # 104.16.0.0/13 (104.16-23.x.x), 104.24.0.0/14 (104.24-27.x.x)
+    # 108.162.192.0/18
+    # 131.0.72.0/22
+    # 141.101.64.0/18
+    # 162.158.0.0/15 (162.158-159.x.x)
+    # 172.64.0.0/13 (172.64-71.x.x)
+    # 173.245.48.0/20
+    # 188.114.96.0/20 (188.114.96-111.x.x)
+    # 190.93.240.0/20
+    # 197.234.240.0/22
+    # 198.41.128.0/17 (198.41.128-255.x.x)
+    case "$oct1" in
+        103) [[ "$oct2" -eq 21 || "$oct2" -eq 22 || "$oct2" -eq 31 ]] && return 0 ;;
+        104) [[ "$oct2" -ge 16 && "$oct2" -le 27 ]] && return 0 ;;
+        108) [[ "$oct2" -eq 162 ]] && return 0 ;;
+        131) [[ "$oct2" -eq 0 && "$oct3" -ge 72 && "$oct3" -le 75 ]] && return 0 ;;
+        141) [[ "$oct2" -eq 101 ]] && return 0 ;;
+        162) [[ "$oct2" -ge 158 && "$oct2" -le 159 ]] && return 0 ;;
+        172) [[ "$oct2" -ge 64 && "$oct2" -le 71 ]] && return 0 ;;
+        173) [[ "$oct2" -eq 245 ]] && return 0 ;;
+        188) [[ "$oct2" -eq 114 && "$oct3" -ge 96 && "$oct3" -le 111 ]] && return 0 ;;
+        190) [[ "$oct2" -eq 93 ]] && return 0 ;;
+        197) [[ "$oct2" -eq 234 ]] && return 0 ;;
+        198) [[ "$oct2" -eq 41 && "$oct3" -ge 128 ]] && return 0 ;;
+    esac
+    return 1
+}
+
 # Escritura atomica: escribe a tmp y luego mv (previene corrupcion por crash)
 atomic_write() {
     local file="$1"
@@ -188,7 +236,7 @@ elif [[ "$existing_state_len" -gt 0 ]]; then
     log "WARN" "State file sin IPs guardadas (version antigua). Usando check amplio de Cloudflare."
     our_ips=("__CHECK_ALL_CLOUDFLARE__")
 else
-    # Sin state file: resolver IPs frescas con dig
+    # Sin state file: resolver IPs frescas con dig y filtrar solo Cloudflare
     IFS=',' read -ra DOMAIN_LIST <<< "$DOMAINS"
     our_ips=()
 
@@ -198,12 +246,22 @@ else
         if [[ -z "$domain" ]]; then continue; fi
 
         while IFS= read -r ip; do
-            [[ -n "$ip" ]] && our_ips+=("$ip")
+            if [[ -n "$ip" ]] && is_cloudflare_ip "$ip"; then
+                our_ips+=("$ip")
+            fi
         done < <(dig +short "$domain" A 2>/dev/null)
         while IFS= read -r ip; do
-            [[ -n "$ip" ]] && our_ips+=("$ip")
+            if [[ -n "$ip" ]] && is_cloudflare_ip "$ip"; then
+                our_ips+=("$ip")
+            fi
         done < <(dig +short "$domain" AAAA 2>/dev/null)
     done
+
+    if [[ ${#our_ips[@]} -eq 0 ]]; then
+        log "WARN" "Ninguna IP resuelta es de Cloudflare. El proxy podria estar desactivado manualmente."
+        log "INFO" "Abortando. Si el proxy esta activo, comprueba la configuracion de DNS."
+        exit 0
+    fi
 fi
 
 # Eliminar duplicados (compatible bash 3)
