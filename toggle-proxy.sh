@@ -34,6 +34,11 @@ TELEGRAM_CHAT_ID="${TELEGRAM_CHAT_ID:-}"
 HAYAHORA_API="https://hayahora.futbol/estado/data.json"
 CF_API_BASE="https://api.cloudflare.com/client/v4"
 
+# Dominios protegidos: NUNCA se les quita el proxy/CDN
+# media.upload-post.com esta hardcodeado como proteccion extra
+PROTECTED_DOMAINS="${PROTECTED_DOMAINS:-}"
+PROTECTED_DOMAINS_BUILTIN="media.upload-post.com"
+
 mkdir -p "$(dirname "$LOG_FILE")" "$(dirname "$STATE_FILE")"
 
 # --- Funciones auxiliares ----------------------------------------------------
@@ -57,6 +62,26 @@ notify_telegram() {
             log "WARN" "No se pudo enviar notificacion de Telegram"
         }
     fi
+}
+
+# Comprobar si un registro DNS pertenece a un dominio protegido
+# Devuelve 0 (true) si el nombre coincide con un dominio protegido o es subdominio de el
+is_protected_domain() {
+    local record_name="$1"
+    local all_protected="${PROTECTED_DOMAINS_BUILTIN}"
+    if [[ -n "$PROTECTED_DOMAINS" ]]; then
+        all_protected="${all_protected},${PROTECTED_DOMAINS}"
+    fi
+
+    IFS=',' read -ra prot_list <<< "$all_protected"
+    for prot in "${prot_list[@]}"; do
+        prot="$(echo "$prot" | xargs)"
+        [[ -z "$prot" ]] && continue
+        if [[ "$record_name" == "$prot" || "$record_name" == *".${prot}" ]]; then
+            return 0
+        fi
+    done
+    return 1
 }
 
 # Comprobar si una IP pertenece a los rangos de Cloudflare
@@ -214,6 +239,9 @@ cf_api() {
 # PASO 1: Resolver IPs de nuestros dominios y comprobar contra hayahora.futbol
 # =============================================================================
 
+_all_prot="${PROTECTED_DOMAINS_BUILTIN}"
+[[ -n "$PROTECTED_DOMAINS" ]] && _all_prot="${_all_prot},${PROTECTED_DOMAINS}"
+log "INFO" "Dominios protegidos (nunca se quita CDN): ${_all_prot}"
 log "INFO" "Comprobando estado de bloqueos LaLiga para nuestros dominios..."
 
 # Si ya deshabilitamos el proxy, dig devuelve las IPs de origen (no las de Cloudflare).
@@ -404,6 +432,19 @@ fi
 # En modo DRY_RUN: solo informar y salir
 if [[ "$DRY_RUN" == "true" ]]; then
     if [[ "$action" == "disable" ]]; then
+        # Mostrar dominios protegidos que se saltarian
+        IFS=',' read -ra _dry_domains <<< "$DOMAINS"
+        _dry_skip=""
+        for _de in "${_dry_domains[@]}"; do
+            _dd="${_de#*:}"
+            if is_protected_domain "$_dd"; then
+                _dry_skip="${_dry_skip}${_dd}, "
+            fi
+        done
+        if [[ -n "$_dry_skip" ]]; then
+            log "DRY_RUN" "Dominios PROTEGIDOS (no se tocaran): ${_dry_skip%, }"
+        fi
+
         if [[ "$script_disabled_proxy" == "true" ]]; then
             log "DRY_RUN" "Bloqueo activo. Ya hay $state_count registro(s) deshabilitado(s). Se comprobarian los restantes."
         else
@@ -487,6 +528,12 @@ if [[ "$action" == "disable" ]]; then
             record_type="$(echo "$record" | jq -r '.type')"
             record_content="$(echo "$record" | jq -r '.content')"
             record_ttl="$(echo "$record" | jq '.ttl')"
+
+            # PROTECCION: nunca deshabilitar proxy en dominios protegidos
+            if is_protected_domain "$record_name"; then
+                log "WARN" "  [PROTEGIDO] $record_name esta en la lista de dominios protegidos. NO se tocara."
+                continue
+            fi
 
             # Saltar si ya esta en state file (crash anterior ya lo deshabilito)
             if jq -e --arg id "$record_id" '.[] | select(.record_id == $id)' "$STATE_FILE" >/dev/null 2>&1; then
