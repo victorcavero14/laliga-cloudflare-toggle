@@ -12,6 +12,8 @@ echo " Timeout:   ${MAX_DISABLED_HOURS:-12}h"
 echo "========================================"
 
 while true; do
+    # Latido para el HEALTHCHECK: si el bucle se cuelga deja de tocarse
+    touch /tmp/heartbeat
     /app/toggle-proxy.sh || true
     sleep "${CHECK_INTERVAL:-300}"
 done
