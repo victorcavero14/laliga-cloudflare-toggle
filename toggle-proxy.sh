@@ -481,6 +481,8 @@ if [[ "$action" == "disable" ]]; then
 
     any_error=false
     total_disabled=0
+    total_reapplied=0
+    reapplied_names=""
 
     for entry in "${DOMAIN_LIST[@]}"; do
         entry="$(echo "$entry" | xargs)"
@@ -535,9 +537,25 @@ if [[ "$action" == "disable" ]]; then
                 continue
             fi
 
-            # Saltar si ya esta en state file (crash anterior ya lo deshabilito)
+            # Si ya esta en state file pero vuelve a estar proxied, alguien (o algo)
+            # ha reactivado la nube naranja durante el bloqueo: hay que volver a
+            # quitarla. Antes se saltaba y la web se quedaba caida todo el partido.
             if jq -e --arg id "$record_id" '.[] | select(.record_id == $id)' "$STATE_FILE" >/dev/null 2>&1; then
-                log "INFO" "  [SKIP] $record_name ya en state file (crash anterior)"
+                reapply_body="$(jq -n \
+                    --arg name "$record_name" \
+                    --arg type "$record_type" \
+                    --arg content "$record_content" \
+                    --argjson ttl "$record_ttl" \
+                    '{name: $name, type: $type, content: $content, ttl: $ttl, proxied: false}'
+                )"
+                if cf_api PATCH "/zones/${zone_id}/dns_records/${record_id}" "$reapply_body" >/dev/null; then
+                    log "WARN" "  [REAPLICADO] $record_name estaba en state file pero alguien reactivo el proxy. Quitado de nuevo."
+                    total_reapplied=$((total_reapplied + 1))
+                    reapplied_names="${reapplied_names}  - ${record_name}"$'\n'
+                else
+                    log "ERROR" "  [FAIL] No se pudo volver a deshabilitar proxy para $record_type $record_name"
+                    any_error=true
+                fi
                 continue
             fi
 
@@ -587,6 +605,17 @@ LaLiga ha activado bloqueos. Se ha quitado el proxy (nube naranja → gris) en $
 <code>$records_list</code>
 
 Motivo: $blocked_details
+EOF
+)"
+    fi
+
+    if [[ "$total_reapplied" -gt 0 ]]; then
+        notify_telegram "$(cat <<EOF
+⚠️ <b>Alguien reactivo el proxy de Cloudflare durante el bloqueo</b>
+
+Se ha vuelto a quitar (naranja → gris) en $total_reapplied registro(s):
+
+<code>${reapplied_names}</code>
 EOF
 )"
     fi
